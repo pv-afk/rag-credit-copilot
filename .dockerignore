@@ -1,0 +1,13 @@
+.venv/
+venv/
+.git/
+.github/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+data/processed/
+.DS_Store
+*.log

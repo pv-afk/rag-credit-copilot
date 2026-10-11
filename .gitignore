@@ -1,0 +1,23 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets: keep only the template
+.env
+.env.*
+!.env.example
+
+# Generated artifacts (rebuilt by `python -m src.build_index`)
+data/processed/
+
+# OS / editors / logs
+.DS_Store
+.idea/
+.vscode/
+*.log
