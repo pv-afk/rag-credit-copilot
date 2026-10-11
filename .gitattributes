@@ -1,0 +1,4 @@
+# Синтетический корпус для RAG создаётся scripts/generate_docs.py из data/sources/*.md.
+# Это данные, а не исходный код: исключаем их из статистики языков GitHub (Linguist).
+data/raw/*.html linguist-generated
+data/raw/*.pdf linguist-generated

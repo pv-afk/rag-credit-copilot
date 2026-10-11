@@ -21,10 +21,10 @@ class VectorStore:
 
     def search(self, query_embedding: np.ndarray, top_k: int) -> list[tuple[str, float]]:
         if self.index is None:
-            raise RuntimeError("Vector index not built/loaded")
+            raise RuntimeError("Векторный индекс не построен и не загружен")
         scores, indices = self.index.search(query_embedding.reshape(1, -1), top_k)
         results = []
-        for idx, score in zip(indices[0], scores[0]):
+        for idx, score in zip(indices[0], scores[0], strict=True):
             if idx == -1:
                 continue
             results.append((self.chunk_ids[idx], float(score)))
@@ -32,7 +32,7 @@ class VectorStore:
 
     def save(self, index_path: Path = FAISS_INDEX_PATH) -> None:
         if self.index is None:
-            raise RuntimeError("Nothing to save")
+            raise RuntimeError("Индекс не построен: сохранять нечего")
         faiss.write_index(self.index, str(index_path))
         ids_path = index_path.with_suffix(".ids.json")
         ids_path.write_text(json.dumps(self.chunk_ids), encoding="utf-8")

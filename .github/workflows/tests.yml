@@ -18,5 +18,7 @@ jobs:
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check src api eval/evaluate.py tests scripts streamlit_app.py
       - name: Run tests
         run: pytest -q

@@ -10,6 +10,16 @@ def test_load_documents_parses_pdf_and_html_with_relative_paths():
     for doc in documents:
         assert doc.text.strip()
         assert doc.title.strip()
-        # Paths are stored relative to the repo root, never as absolute local paths.
+        # Пути хранятся относительно корня репозитория, без локальных абсолютных путей.
         assert doc.source_path.startswith("data/raw/")
     assert len({d.doc_id for d in documents}) == len(documents)
+
+
+def test_load_documents_skips_unsupported_files(tmp_path):
+    html = "<html><title>Заголовок</title><body><p>Текст</p></body></html>"
+    (tmp_path / "doc.html").write_text(html, encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("не документ", encoding="utf-8")
+
+    documents = load_documents(tmp_path)
+
+    assert [d.title for d in documents] == ["Заголовок"]

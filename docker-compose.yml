@@ -1,24 +1,23 @@
 services:
   api:
     build: .
+    image: rag-credit-copilot:latest
     ports:
       - "8000:8000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-opus-4-8}
       - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
-      # Hardcoded (not read from .env): host.docker.internal resolves to the
-      # host machine from inside the container (Docker Desktop on Mac/Windows).
-      # .env's OLLAMA_BASE_URL is for the native/venv run, where "localhost"
-      # is correct - inside this container it would mean the container itself,
-      # not the host running `ollama serve`, so that value must not apply here.
+      # Не берётся из .env: там localhost для запуска без Docker, а из контейнера
+      # Ollama на хосте доступна только через host.docker.internal.
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   streamlit:
-    build: .
+    # Тот же образ, что у api: собирается один раз.
+    image: rag-credit-copilot:latest
     command: ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
     ports:
       - "8501:8501"

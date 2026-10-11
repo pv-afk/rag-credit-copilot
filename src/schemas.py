@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -33,10 +33,13 @@ class Citation(BaseModel):
     quote: str = Field(description="Short verbatim quote from the cited chunk supporting the claim")
 
 
+Confidence = Literal["high", "medium", "low", "insufficient_context"]
+
+
 class AnswerResponse(BaseModel):
     answer: str
     citations: list[Citation]
-    confidence: Literal["high", "medium", "low", "insufficient_context"]
+    confidence: Confidence
     is_answerable: bool = Field(
         description="False if the retrieved context does not contain enough information to answer"
     )
@@ -44,13 +47,14 @@ class AnswerResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    top_k: Optional[int] = None
+    # Больше 20 не имеет смысла: RRF объединяет не более TOP_K_VECTOR + TOP_K_BM25 кандидатов.
+    top_k: int | None = Field(default=None, ge=1, le=20)
 
 
 class QueryResponse(BaseModel):
     question: str
     answer: str
     citations: list[Citation]
-    confidence: str
+    confidence: Confidence
     is_answerable: bool
     retrieved_chunk_ids: list[str]

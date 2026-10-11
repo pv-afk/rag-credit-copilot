@@ -1,15 +1,17 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app, pipeline
 from src.schemas import QueryResponse
 
 
-def test_health_endpoint_reports_index_not_loaded_by_default():
+def test_health_reports_index_state(monkeypatch):
+    monkeypatch.setattr(pipeline, "_loaded", False)
     client = TestClient(app)
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json() == {"status": "ok", "index_loaded": False}
 
 
 def test_query_returns_503_when_index_not_loaded(monkeypatch):
@@ -28,6 +30,16 @@ def test_query_rejects_empty_question(monkeypatch):
     response = client.post("/query", json={"question": "   "})
 
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("top_k", [0, -2, 21])
+def test_query_rejects_out_of_range_top_k(monkeypatch, top_k):
+    monkeypatch.setattr(pipeline, "_loaded", True)
+    client = TestClient(app)
+
+    response = client.post("/query", json={"question": "CET1?", "top_k": top_k})
+
+    assert response.status_code == 422
 
 
 def test_query_returns_answer_when_loaded(monkeypatch):

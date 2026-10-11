@@ -11,7 +11,11 @@ def reciprocal_rank_fusion(
     bm25_results: list[tuple[str, float]],
     rrf_k: int = RRF_K,
 ) -> dict[str, dict[str, float]]:
-    """Combines two ranked lists into fused RRF scores, keyed by chunk_id."""
+    """Объединяет два ранжированных списка по RRF: score = Σ 1 / (k + rank + 1).
+
+    Возвращает словарь chunk_id -> {vector_score, bm25_score, fused_score}; исходные
+    скоры сохраняются (0.0, если фрагмент нашёл только один из методов).
+    """
     fused: dict[str, dict[str, float]] = {}
 
     for rank, (chunk_id, score) in enumerate(vector_results):
@@ -37,6 +41,9 @@ class HybridRetriever:
         self.vector_store.load()
         self.bm25_index.load()
         self.chunks = load_chunks()
+        # Индексы строятся одним запуском build_index; расхождение означает частичную пересборку.
+        if set(self.vector_store.chunk_ids) != set(self.chunks) or set(self.bm25_index.chunk_ids) != set(self.chunks):
+            raise RuntimeError("Индексы в data/processed не согласованы. Пересоберите: python -m src.build_index")
 
     def retrieve(
         self,
@@ -52,17 +59,4 @@ class HybridRetriever:
         fused = reciprocal_rank_fusion(vector_results, bm25_results)
         ranked_ids = sorted(fused.items(), key=lambda x: x[1]["fused_score"], reverse=True)
 
-        results: list[RetrievedChunk] = []
-        for chunk_id, scores in ranked_ids[:top_k]:
-            chunk = self.chunks.get(chunk_id)
-            if chunk is None:
-                continue
-            results.append(
-                RetrievedChunk(
-                    chunk=chunk,
-                    vector_score=scores["vector_score"],
-                    bm25_score=scores["bm25_score"],
-                    fused_score=scores["fused_score"],
-                )
-            )
-        return results
+        return [RetrievedChunk(chunk=self.chunks[chunk_id], **scores) for chunk_id, scores in ranked_ids[:top_k]]

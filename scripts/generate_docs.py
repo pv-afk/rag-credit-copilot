@@ -1,27 +1,25 @@
-"""
-One-off script: converts the synthetic markdown sources in data/sources/
-into the PDF/HTML "public documents" that live in data/raw/, simulating
-the ingestion inputs a real RAG pipeline would receive.
+"""Генерирует корпус data/raw/ из синтетических markdown-источников data/sources/.
 
-Not part of the runtime app - dev-only tooling.
+Чётные по порядку файлы сохраняются в PDF, нечётные — в HTML, чтобы ingestion
+работал с обоими форматами. Скрипт нужен только для разработки и в работе
+сервиса не участвует. Зависимость: reportlab (requirements-dev.txt).
 """
 import re
 from pathlib import Path
 
+from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import LETTER
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import SimpleDocTemplate, Paragraph, ListFlowable, ListItem
-from reportlab.lib.enums import TA_LEFT
+from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "data" / "sources"
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-# The built-in Helvetica/Courier base-14 fonts have no Cyrillic glyphs, so
-# register a Unicode TTF for Russian-language PDF generation.
+# Встроенные шрифты PDF (Helvetica, Courier) не содержат кириллицы — нужен Unicode TTF.
 _FONT_CANDIDATES = [
     ("/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
     ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
@@ -84,7 +82,7 @@ def md_to_flowables(md_text: str):
             while i < len(lines) and lines[i].startswith("|"):
                 table_lines.append(lines[i])
                 i += 1
-            clean = [l for l in table_lines if not re.match(r"^\|[\s\-|]+\|$", l)]
+            clean = [row for row in table_lines if not re.match(r"^\|[\s\-|]+\|$", row)]
             flowables.append(Paragraph("<br/>".join(c.strip() for c in clean), styles["Tablec"]))
             continue
         if line.startswith("# "):
@@ -165,7 +163,9 @@ def md_to_html(md_text: str, title: str) -> str:
             if not in_ul:
                 body.append("<ul>")
                 in_ul = True
-            body.append(f"<li>{inline_html(re.sub(r'^[-*]\\s+', '', line))}</li>")
+            # Маркер "- " остаётся в тексте пункта: так сгенерированы закоммиченные
+            # data/raw/*.html, и их нужно воспроизводить без изменений (см. README).
+            body.append(f"<li>{inline_html(line)}</li>")
         else:
             close_ul()
             body.append(f"<p>{inline_html(line)}</p>")
@@ -198,7 +198,7 @@ def main():
     md_files = sorted(SRC_DIR.glob("*.md"))
     for idx, path in enumerate(md_files):
         text = path.read_text(encoding="utf-8")
-        title_line = next((l for l in text.splitlines() if l.startswith("# ")), path.stem)
+        title_line = next((ln for ln in text.splitlines() if ln.startswith("# ")), path.stem)
         title = title_line.lstrip("# ").strip()
         stem = path.stem
 

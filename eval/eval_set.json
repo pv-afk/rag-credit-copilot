@@ -3,7 +3,7 @@
   {"id": "q02", "question": "В чём разница между стандартизированным подходом и подходом IRB для активов, взвешенных по кредитному риску?", "expected_source_contains": "doc_01_basel3_capital"},
   {"id": "q03", "question": "Какие три стадии выделяются в модели обесценения по МСФО 9?", "expected_source_contains": "doc_02_ifrs9_ecl"},
   {"id": "q04", "question": "Как рассчитываются ожидаемые кредитные убытки (ECL) по МСФО 9?", "expected_source_contains": "doc_02_ifrs9_ecl"},
-  {"id": "q05", "question": "В чём разница между базовым (Foundation) и продвинутым (Advanced) подходом IRB с точки зрения того, какие параметры оценивает банк?", "expected_source_contains": "doc_03_pd_lgd_ead_models"},
+  {"id": "q05", "question": "В чём разница между базовым (Foundation) и продвинутым (Advanced) подходом IRB с точки зрения того, какие параметры оценивает банк?", "expected_source_contains": "doc_01_basel3_capital"},
   {"id": "q06", "question": "Что такое коэффициент кредитной конверсии и как он используется для оценки EAD?", "expected_source_contains": "doc_03_pd_lgd_ead_models"},
   {"id": "q07", "question": "Какой типичный диапазон нотчинга для старшего обеспеченного долга выше рейтинга эмитента?", "expected_source_contains": "doc_04_rating_methodology"},
   {"id": "q08", "question": "Что означает постановка рейтинга в список CreditWatch?", "expected_source_contains": "doc_04_rating_methodology"},

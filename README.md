@@ -1,41 +1,78 @@
 # RAG Credit Copilot
 
-A retrieval-augmented question-answering system for credit analysts, built end to end:
-document ingestion → chunking → dense + sparse retrieval → rank fusion → grounded,
-citation-backed structured generation → retrieval evaluation.
+Вопросно-ответная RAG-система для кредитного аналитика: ingestion документов → разбиение на
+фрагменты → Hybrid Retrieval (FAISS + BM25) → объединение через RRF → генерация ответа с цитатами
+в виде структурированного JSON → оценка retrieval.
 
-The knowledge base and the queries are in **Russian**, which drives several design choices
-below (multilingual embeddings, a Cyrillic-aware BM25 tokenizer, a Russian system prompt).
+База знаний и вопросы — на русском языке. От этого зависят несколько решений: мультиязычные
+embeddings, токенизатор BM25 с поддержкой кириллицы, системный промпт на русском.
 
-> **About the data.** The 14 documents in `data/raw/` are **synthetic** educational texts
-> on public credit-risk topics (Basel III, IFRS 9, PD/LGD/EAD, rating methodology,
-> covenants, collateral, stress testing, early-warning indicators, restructuring,
-> syndicated lending, sovereign and counterparty risk, KYC/AML). They were written for
-> this project and contain no internal bank documents, client data, or proprietary code.
-> `scripts/generate_docs.py` shows how they were rendered from `data/sources/*.md` into
-> a mixed PDF/HTML corpus to exercise the ingestion layer.
+> **О данных.** 14 документов в `data/raw/` — синтетические учебные тексты на публичные темы
+> кредитного риска (Базель III, МСФО 9, PD/LGD/EAD, рейтинговая методология, ковенанты, залоги,
+> стресс-тестирование, раннее предупреждение, реструктуризация, синдицированное кредитование,
+> суверенный риск и риск контрагента, KYC/AML). Внутренних документов банков, данных клиентов и
+> корпоративного кода в репозитории нет. Корпус собран скриптом `scripts/generate_docs.py`
+> из `data/sources/*.md`: половина документов сохранена в PDF, половина — в HTML.
 
----
+## Кратко о проекте
 
-## Project Overview
+Каждый этап реализован отдельным небольшим модулем без фреймворков-оркестраторов, поэтому его
+можно прочитать, протестировать и заменить. На вопрос система:
 
-The goal is a small but complete RAG system where each stage is explicit, inspectable,
-and testable, with no orchestration framework hiding the mechanics. Given a question, the
-system:
+1. ищет фрагменты параллельно векторным поиском (**FAISS**, косинусная близость embeddings)
+   и лексическим (**BM25**);
+2. объединяет два ранжированных списка методом **Reciprocal Rank Fusion (RRF)**;
+3. **отказывается отвечать** («Не знаю»), не обращаясь к LLM, если ни один найденный фрагмент
+   не близок к вопросу по косинусу;
+4. иначе просит LLM ответить **только по найденным фрагментам** и вернуть JSON по схеме:
+   ответ, цитаты (`chunk_id` + дословная выдержка), самооценка уверенности.
 
-1. retrieves candidate chunks with **FAISS** (cosine similarity over sentence embeddings)
-   and **BM25** in parallel,
-2. merges both rankings with **Reciprocal Rank Fusion (RRF)**,
-3. **refuses to answer** ("I don't know") if no retrieved chunk is semantically close
-   enough to the question, without calling the LLM,
-4. otherwise asks an LLM to answer **only from the retrieved context**, returning a
-   schema-validated JSON object with per-claim citations (`chunk_id` + verbatim quote)
-   and a confidence label.
+Генерация идёт через **Claude API** или **локальную модель в Ollama**; провайдер выбирается
+одной переменной окружения. Retrieval работает локально и ключей не требует.
 
-Generation runs on either the **Claude API** or a **local model via Ollama**, selected by
-one environment variable. Retrieval runs fully locally and needs no API key.
+## Возможности
 
-## Architecture
+**Ingestion** (`src/ingestion.py`)
+- Извлечение текста из PDF (`pypdf`) и HTML (`BeautifulSoup`, без `<script>`/`<style>`); остальные файлы пропускаются.
+- Нормализация пробелов; заголовок берётся из `<title>`/`<h1>` (HTML) или первой непустой строки (PDF).
+- Стабильный `doc_id` (SHA-1 от имени файла); путь к источнику хранится относительно корня репозитория.
+
+**Разбиение на фрагменты** (`src/chunking.py`)
+- Скользящее окно по словам: по умолчанию 220 слов с перекрытием 40, границы абзацев сохраняются.
+- У каждого фрагмента есть `doc_id`, `title`, `source_path`, `chunk_index`; `chunk_id` имеет вид `<doc_id>_<n>`.
+
+**Retrieval** (`src/vectorstore.py`, `src/bm25_index.py`, `src/hybrid.py`)
+- Векторный поиск: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, нормированные
+  embeddings, точный поиск `faiss.IndexFlatIP` (скалярное произведение нормированных векторов = косинус).
+- BM25: `rank_bm25.BM25Okapi` с регулярным токенизатором латиницы, кириллицы и цифр; стемминга и лемматизации нет.
+- RRF: `score(d) = Σ 1 / (k + rank(d) + 1)` по обоим спискам, `k = 60`; по 8 кандидатов от каждого
+  метода, в контекст LLM уходят 5 лучших. RRF использует только ранги, поэтому несопоставимые шкалы
+  косинуса и BM25 калибровать не нужно.
+- При загрузке проверяется, что FAISS-индекс, BM25 и хранилище фрагментов собраны из одного набора фрагментов.
+
+**Порог отказа** (`src/llm.py`)
+- RRF-скор не отражает абсолютную релевантность, поэтому решение принимается по **максимальной
+  косинусной близости** среди найденных фрагментов. Ниже `MIN_RELEVANCE_SCORE` (по умолчанию `0.48`)
+  возвращается `is_answerable=false` без вызова LLM.
+
+**Генерация** (`src/llm.py`)
+- Системный промпт требует отвечать только по контексту и подкреплять каждое утверждение цитатой с `chunk_id`.
+- Схема ответа `AnswerResponse`: `answer`, `citations[]`, `confidence ∈ {high, medium, low, insufficient_context}`, `is_answerable`.
+- Claude: `client.messages.parse(..., output_format=AnswerResponse)` — ответ сразу валидируется как Pydantic-модель.
+- Ollama: `format=<JSON-схема>` (constrained decoding), `temperature=0`, затем валидация Pydantic.
+- Отсутствующий или невалидный структурированный ответ превращается в `LLMOutputError` → HTTP 502.
+- Дословность цитат и их соответствие ответу **не проверяются** (см. «Ограничения»).
+
+**API и интерфейс**
+- FastAPI (`api/main.py`): `POST /query`, `GET /health`, OpenAPI-документация на `/docs`.
+  Коды ошибок: 503 — индекс не собран, 400 — пустой вопрос, 422 — невалидный запрос
+  (в т. ч. `top_k` вне диапазона 1–20), 502 — ошибки аутентификации, провайдера LLM или
+  невалидный ответ модели, 504 — таймаут Ollama.
+- Streamlit (`streamlit_app.py`): поле вопроса, выбор Top-K, ответ, цитаты, ID найденных фрагментов;
+  ошибки API показываются с текстом из ответа сервера.
+- Docker Compose: сервисы `api` и `streamlit` на одном образе; индексы собираются при сборке образа.
+
+## Архитектура
 
 ```
 data/raw/*.pdf, *.html
@@ -44,85 +81,77 @@ data/raw/*.pdf, *.html
  ingestion.py ─────── pypdf / BeautifulSoup → Document(doc_id, title, text, source_path)
         │
         ▼
- chunking.py ──────── sliding window: 220 words, 40-word overlap
+ chunking.py ──────── скользящее окно: 220 слов, перекрытие 40
         │
-        ├─────────────────────────────┐
-        ▼                             ▼
+        ├──────────────────────────────┐
+        ▼                              ▼
  embeddings.py                    bm25_index.py
- multilingual MiniLM-L12 (384-d)  BM25Okapi, Cyrillic-aware tokenizer
-        │                             │
-        ▼                             │
- vectorstore.py                       │
- FAISS IndexFlatIP (L2-normalized     │
- vectors → cosine similarity)         │
-        │   top-8                     │   top-8
-        └──────────► hybrid.py ◄──────┘
-                 Reciprocal Rank Fusion (k=60) → top-5
+ multilingual MiniLM-L12 (384-d)  BM25Okapi, токенизатор с кириллицей
+        │                              │
+        ▼                              │
+ vectorstore.py                        │
+ FAISS IndexFlatIP                     │
+        │   top-8                      │   top-8
+        └──────────► hybrid.py ◄───────┘
+                 RRF (k=60) → top-5
                          │
                          ▼
                       llm.py
-        relevance gate: max cosine < MIN_RELEVANCE_SCORE → "I don't know"
-        else: Claude (messages.parse + Pydantic schema)
-              or Ollama (/api/chat with JSON-schema-constrained decoding)
+        max cosine < MIN_RELEVANCE_SCORE → «Не знаю» (без LLM)
+        иначе: Claude (messages.parse + Pydantic) или Ollama (JSON-схема)
                          │
                          ▼
                 pipeline.py → QueryResponse
                          │
              ┌───────────┴───────────┐
              ▼                       ▼
-     api/main.py (FastAPI)    streamlit_app.py (UI, calls the API)
+     api/main.py (FastAPI)    streamlit_app.py (UI → HTTP → API)
 ```
 
-Build-time artifacts (`data/processed/`: `chunks.jsonl`, `faiss.index`, `faiss.ids.json`,
-`bm25.pkl`) are produced by `python -m src.build_index` and are not committed.
+Индексы (`data/processed/`: `chunks.jsonl`, `faiss.index`, `faiss.ids.json`, `bm25.pkl`) создаёт
+`python -m src.build_index`; в репозиторий они не входят.
 
-## Features
+```
+├── api/main.py              # FastAPI: /query, /health, сопоставление ошибок с HTTP-кодами
+├── src/
+│   ├── config.py            # настройки из переменных окружения и .env
+│   ├── schemas.py           # Pydantic-модели: Document, Chunk, AnswerResponse, QueryRequest/Response
+│   ├── ingestion.py         # PDF/HTML → Document
+│   ├── chunking.py          # скользящее окно
+│   ├── chunk_store.py       # хранение фрагментов в JSONL
+│   ├── embeddings.py        # sentence-transformers (модель загружается один раз)
+│   ├── vectorstore.py       # FAISS: построение, поиск, сохранение
+│   ├── bm25_index.py        # BM25 и токенизатор
+│   ├── hybrid.py            # RRF и HybridRetriever
+│   ├── llm.py               # порог отказа, генерация через Claude / Ollama
+│   ├── pipeline.py          # retrieval + генерация → QueryResponse
+│   └── build_index.py       # CLI: полная пересборка индексов
+├── streamlit_app.py         # интерфейс
+├── eval/                    # eval_set.json и скрипт Recall@k
+├── scripts/generate_docs.py # генерация корпуса data/raw из data/sources (только для разработки)
+├── data/sources/            # markdown-исходники синтетических документов
+├── data/raw/                # корпус для ingestion (PDF/HTML)
+├── tests/
+├── Dockerfile, docker-compose.yml
+└── requirements.txt, requirements-dev.txt, ruff.toml
+```
 
-**Ingestion**
-- PDF text extraction (`pypdf`) and HTML parsing (`BeautifulSoup`, `<script>`/`<style>` stripped).
-- Whitespace normalization; title taken from `<title>`/`<h1>` (HTML) or the first non-empty line (PDF).
-- Stable document IDs (SHA-1 of the file name). Source paths are stored relative to the repo root.
+## Технологии
 
-**Chunking**
-- Word-based sliding window (default 220 words, 40-word overlap) over paragraph-split text, preserving paragraph breaks.
-- Each chunk carries `doc_id`, `title`, `source_path`, and `chunk_index`; IDs look like `<doc_id>_<n>`.
-
-**Retrieval**
-- Dense: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, normalized embeddings, exact search with `faiss.IndexFlatIP`.
-- Sparse: `rank_bm25.BM25Okapi` with a regex tokenizer that keeps Latin and Cyrillic word tokens (no stemming or lemmatization).
-- Fusion: RRF, `score(d) = Σ 1 / (k + rank(d) + 1)` over both lists, `k = 60`. RRF uses ranks only, so the incompatible scales of cosine similarity and BM25 scores don't need calibrating.
-
-**Answerability gate**
-- RRF scores are rank-based and carry no absolute relevance signal, so the gate uses the **best raw cosine similarity** among the retrieved chunks instead. Below `MIN_RELEVANCE_SCORE` (default `0.48`), the pipeline returns `is_answerable=false` without an LLM call.
-
-**Generation**
-- System prompt restricts answers to the provided context and requires a `chunk_id` citation with a short verbatim quote for each factual claim.
-- Output schema (`AnswerResponse`): `answer`, `citations[]`, `confidence ∈ {high, medium, low, insufficient_context}`, `is_answerable`.
-- Claude: `client.messages.parse(..., output_format=AnswerResponse)` returns a validated Pydantic object.
-- Ollama: `format=<JSON schema>` (constrained decoding), `temperature=0`, then Pydantic validation.
-- Malformed or missing structured output raises `LLMOutputError`, which the API maps to HTTP 502.
-
-**Serving**
-- FastAPI: `POST /query`, `GET /health`, OpenAPI docs at `/docs`. Typed error mapping: 503 (index not built), 400 (empty question), 502 (auth, provider, or invalid-output errors), 504 (Ollama timeout).
-- Streamlit UI with a Top-K slider, a confidence label, a citation list, and retrieved chunk IDs for debugging.
-- Docker Compose with two services (API + UI). Indexes are built into the image at build time.
-
-## Tech Stack
-
-| Layer | Tools |
+| Слой | Инструменты |
 |---|---|
-| Language | Python 3.11+ |
-| Parsing | `pypdf`, `beautifulsoup4` |
+| Язык | Python 3.11+ |
+| Парсинг | `pypdf`, `beautifulsoup4` |
 | Embeddings | `sentence-transformers` (multilingual MiniLM-L12, 384-d), PyTorch CPU |
-| Vector search | `faiss-cpu` (`IndexFlatIP`) |
-| Lexical search | `rank-bm25` |
-| LLM | Anthropic Claude API (`anthropic` SDK), or Ollama (default `llama3.1:8b`) |
-| Schemas | Pydantic v2 |
+| Векторный поиск | `faiss-cpu` (`IndexFlatIP`) |
+| Лексический поиск | `rank-bm25` |
+| LLM | Claude API (`anthropic`) или Ollama (по умолчанию `llama3.1:8b`) |
+| Схемы | Pydantic v2 |
 | API / UI | FastAPI + Uvicorn, Streamlit |
-| Testing | pytest, FastAPI `TestClient`; GitHub Actions CI |
-| Packaging | Docker, Docker Compose |
+| Тесты и линтер | pytest, FastAPI `TestClient`, Ruff; GitHub Actions |
+| Контейнеры | Docker, Docker Compose |
 
-## Installation
+## Установка
 
 ```bash
 git clone https://github.com/pv-afk/rag-credit-copilot.git
@@ -131,64 +160,56 @@ cd rag-credit-copilot
 python -m venv .venv
 source .venv/bin/activate
 
-# Optional but recommended on machines without a GPU: install CPU-only PyTorch first
+# Рекомендуется на машинах без GPU: сначала CPU-сборка PyTorch
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements-dev.txt     # runtime + test dependencies
+pip install -r requirements-dev.txt     # зависимости сервиса + тестов
 
-cp .env.example .env                    # then edit as needed (see Configuration)
-python -m src.build_index               # parse docs, embed, build FAISS + BM25 indexes
+cp .env.example .env                    # затем отредактируйте (см. «Настройка»)
+python -m src.build_index               # разбор документов, embeddings, индексы FAISS и BM25
 ```
 
-The first index build downloads the embedding model (~0.5 GB of weights) from the Hugging Face Hub.
+При первой сборке индекса с Hugging Face Hub скачивается модель embeddings (около 0,5 ГБ).
 
-### Docker
+## Настройка
 
-```bash
-cp .env.example .env
-docker compose up --build
-# API:       http://localhost:8000/docs
-# Streamlit: http://localhost:8501
-```
+Все параметры задаются переменными окружения. При запуске без Docker они читаются из `.env`
+(`python-dotenv`), в Docker их передаёт `docker-compose.yml`. Уже заданные переменные окружения
+имеют приоритет над `.env`.
 
-With `LLM_PROVIDER=ollama`, the API container reaches the host's Ollama at
-`host.docker.internal:11434`.
-
-## Configuration
-
-All settings are environment variables, read from `.env` for native runs (via
-`python-dotenv`) and passed through by `docker-compose.yml` for container runs.
-Variables already set in the environment take precedence over `.env`.
-
-| Variable | Default | Purpose |
+| Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `LLM_PROVIDER` | `anthropic` | `anthropic` (Claude API) or `ollama` (local) |
-| `ANTHROPIC_API_KEY` | — | Required only for `LLM_PROVIDER=anthropic` |
-| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Claude model ID |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint (native runs) |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Local model name |
-| `EMBEDDING_MODEL_NAME` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Embedding model |
-| `CHUNK_SIZE_WORDS` / `CHUNK_OVERLAP_WORDS` | `220` / `40` | Chunking window |
-| `TOP_K_VECTOR` / `TOP_K_BM25` | `8` / `8` | Candidates per retriever |
-| `TOP_K_FINAL` | `5` | Chunks passed to the LLM after fusion |
-| `RRF_K` | `60` | RRF smoothing constant |
-| `MIN_RELEVANCE_SCORE` | `0.48` | Cosine threshold for the answerability gate |
+| `LLM_PROVIDER` | `anthropic` | `anthropic` (Claude API) или `ollama` (локально) |
+| `ANTHROPIC_API_KEY` | — | Нужен только при `LLM_PROVIDER=anthropic` |
+| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Модель Claude |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Адрес Ollama при запуске без Docker |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Локальная модель |
+| `EMBEDDING_MODEL_NAME` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Модель embeddings |
+| `CHUNK_SIZE_WORDS` / `CHUNK_OVERLAP_WORDS` | `220` / `40` | Окно разбиения |
+| `TOP_K_VECTOR` / `TOP_K_BM25` | `8` / `8` | Кандидатов от каждого метода |
+| `TOP_K_FINAL` | `5` | Фрагментов в контексте LLM после RRF |
+| `RRF_K` | `60` | Сглаживающая константа RRF |
+| `MIN_RELEVANCE_SCORE` | `0.48` | Порог косинусной близости для отказа |
 
-Changing the chunking parameters or the embedding model requires re-running `python -m src.build_index`.
+После изменения параметров разбиения или модели embeddings нужно заново выполнить
+`python -m src.build_index`. Порог `MIN_RELEVANCE_SCORE` подобран для MiniLM на этом корпусе;
+для другой модели embeddings его нужно калибровать заново.
 
-**Running fully local, with no API key:**
+**Полностью локальный режим, без ключа API:**
 
 ```bash
-# macOS; see https://ollama.com/download for other platforms
+# macOS; другие платформы — https://ollama.com/download
 brew install ollama && brew services start ollama
 ollama pull llama3.1:8b
-# in .env:  LLM_PROVIDER=ollama
+# в .env:  LLM_PROVIDER=ollama
 ```
 
-## Usage
+## Запуск
+
+**Без Docker:**
 
 ```bash
-uvicorn api.main:app --reload        # API on :8000
-streamlit run streamlit_app.py       # UI on :8501 (in a second terminal)
+uvicorn api.main:app --reload        # API на :8000, документация — http://localhost:8000/docs
+streamlit run streamlit_app.py       # интерфейс на :8501 (во втором терминале)
 ```
 
 ```bash
@@ -197,7 +218,7 @@ curl -s localhost:8000/query \
   -d '{"question": "Каков минимальный норматив CET1 по Базелю III с учётом буфера консервации капитала?"}'
 ```
 
-Actual response from a local run (`LLM_PROVIDER=ollama`, `llama3.1:8b`):
+Реальный ответ локального запуска (`LLM_PROVIDER=ollama`, `llama3.1:8b`):
 
 ```json
 {
@@ -216,88 +237,93 @@ Actual response from a local run (`LLM_PROVIDER=ollama`, `llama3.1:8b`):
 }
 ```
 
-The request body also accepts an optional `top_k` to override `TOP_K_FINAL`.
+Необязательное поле `top_k` (1–20) в запросе переопределяет `TOP_K_FINAL`.
 
-## Evaluation
+**Docker:**
 
-`eval/eval_set.json` holds 24 hand-written questions: 23 in-domain, each labeled with the
-source document expected to contain the answer, and 1 out-of-domain question that should
-trigger a refusal.
+```bash
+cp .env.example .env
+docker compose up --build
+# API:       http://localhost:8000/docs
+# Streamlit: http://localhost:8501
+```
+
+Образ собирается один раз и используется обоими сервисами; индексы строятся на этапе сборки.
+При `LLM_PROVIDER=ollama` контейнер API обращается к Ollama на хосте через `host.docker.internal:11434`.
+
+## Тестирование
+
+```bash
+pytest                                                    # 28 тестов, без сети и без LLM
+ruff check src api eval/evaluate.py tests scripts streamlit_app.py
+```
+
+- `test_chunking.py` — размер окна, перекрытие, последовательные уникальные ID.
+- `test_hybrid_retrieval.py` — RRF как чистая функция; отказ загружать несогласованные индексы.
+- `test_ingestion.py` — разбор корпуса PDF/HTML: относительные пути, уникальные ID, пропуск посторонних файлов.
+- `test_llm.py` — порог отказа (в т. ч. когда первым после RRF стоит фрагмент только из BM25), разбор JSON от Ollama и обработка невалидного вывода.
+- `test_schemas.py` — валидация `AnswerResponse`.
+- `test_api.py` — `/health` и `/query` с подменённым pipeline: коды ошибок, валидация `top_k`.
+
+Тесты и линтер запускаются в CI при каждом push и pull request (`.github/workflows/tests.yml`).
+
+## Оценка качества
+
+`eval/eval_set.json` — 24 вопроса: 23 по теме (у каждого указан документ, в котором есть ответ)
+и 1 вне домена, на который система должна отказаться отвечать.
 
 ```bash
 python -m eval.evaluate --k 5
 ```
 
-The script measures **document-level Recall@k** of the hybrid retriever: a hit means at
-least one of the top-k chunks comes from the expected document. It needs no LLM calls.
-For the out-of-domain question, it reports whether the answerability gate would refuse.
+Скрипт считает **document-level Recall@k** гибридного retrieval: попадание засчитывается, если
+среди top-k фрагментов есть хотя бы один из ожидаемого документа. LLM не вызывается. Для вопроса
+вне домена выводится решение порога отказа.
 
-Results on the current corpus (14 documents → 31 chunks), default settings:
+Результаты на текущем корпусе (14 документов → 31 фрагмент), настройки по умолчанию:
 
-| Metric | Value |
+| Метрика | Значение |
 |---|---|
-| Recall@1 | 19/23 = 82.6% |
-| Recall@3 | 21/23 = 91.3% |
+| Recall@1 | 20/23 = 87,0% |
+| Recall@3 | 22/23 = 95,7% |
 | Recall@5 | 23/23 = 100% |
-| Out-of-domain refusal | 1/1 (top cosine 0.464 vs. threshold 0.48) |
+| Отказ на вопросе вне домена | 1/1 (max cosine 0,464 при пороге 0,48) |
 
-**How to read these numbers.** The corpus is tiny, so k=5 already covers ~16% of all
-chunks, and Recall@5 = 100% is a sanity check, not evidence of retrieval quality at scale.
-The relevance threshold was calibrated by hand on this same corpus; there is no held-out
-split. **Generation quality is not evaluated automatically**: no faithfulness, citation
-precision, or answer-correctness metrics exist yet.
+**Как читать эти цифры:**
+- Метрика мягкая: она не проверяет, что найденный фрагмент содержит сам ответ. У документа
+  2–3 фрагмента, и первым нередко оказывается соседний фрагмент без ответа.
+- Корпус очень маленький: top-5 — это уже около 16% всех фрагментов, поэтому Recall@5 = 100% —
+  проверка работоспособности, а не показатель качества на реальной базе.
+- Порог отказа подобран вручную на этом же корпусе; отдельной тестовой выборки для него нет.
+- Качество генерации (корректность ответов, Faithfulness, точность цитат) автоматически не оценивается.
 
-## Tests
+## Ограничения
 
-```bash
-pytest
-```
+- **Синтетический и маленький корпус:** 14 коротких документов, 31 фрагмент. Результаты retrieval
+  на реальную базу знаний не переносятся.
+- **Хрупкий порог отказа.** Один глобальный порог по косинусу плохо отделяет близкие к финансам
+  вопросы вне базы от вопросов по теме. Пример: «Какая рекомендуемая процентная ставка по 30-летней
+  ипотеке?» набирает 0,502, проходит порог, и `llama3.1:8b` отвечает «20–70%», приняв коэффициент
+  риска Базеля III по ипотеке за процентную ставку. Бывает и обратное: вопрос q11 из `eval_set.json`
+  (maintenance- и incurrence-ковенанты) получает 0,407, и система отказывается, хотя ответ в базе есть.
+- **Нет оценки генерации.** Цитаты запрашиваются и проходят проверку схемы, но то, что выдержка
+  действительно есть в указанном фрагменте и подтверждает ответ, не проверяется.
+- **`confidence` — самооценка LLM**, а не измеренная вероятность правильного ответа. В интерфейсе
+  поле так и подписано: «Самооценка модели».
+- **Нет reranking, переформулирования запроса и многошагового retrieval:** один раунд BM25 + векторный поиск + RRF.
+- **BM25 без морфологии:** токены — словоформы в нижнем регистре, поэтому русские падежи и
+  опечатки снижают полноту лексического поиска.
+- **Особенности корпуса.** Разбиение идёт по пробелам, поэтому переносы строк внутри PDF-текста
+  остаются частью «слов», и размер фрагмента приблизителен. В HTML-документах генератор оставил
+  маркер `- ` в пунктах списков и вывел разделитель таблицы `|---|` отдельным абзацем. Исправление
+  генератора изменило бы корпус и все результаты оценки, поэтому оно отложено до отдельной пересборки.
+- **Точные индексы в памяти:** `IndexFlatIP` и BM25 в pickle подходят для такого объёма; инкрементальной
+  индексации и ANN-индекса нет. `bm25.pkl` загружается через `pickle`, поэтому индексы из ненадёжных
+  источников загружать нельзя.
+- **Скорость локальной модели:** с `llama3.1:8b` ответ занимает около минуты на ноутбуке.
+- **Демонстрационный API:** CORS открыт для всех источников, аутентификации и ограничения частоты
+  запросов нет. Не предназначен для доступа извне localhost.
 
-23 offline tests (no network, no LLM, no embedding model download):
+## Лицензия
 
-- `test_chunking.py`: window sizes, overlap, sequential unique IDs.
-- `test_hybrid_retrieval.py`: RRF scoring as a pure function.
-- `test_ingestion.py`: parses the bundled PDF/HTML corpus and checks for relative paths and unique IDs.
-- `test_llm.py`: answerability gate (including BM25-only top hits), Ollama JSON parsing and invalid-output handling.
-- `test_schemas.py`: `AnswerResponse` validation.
-- `test_api.py`: `/health` and `/query` behavior with a mocked pipeline, including error mapping.
-
-CI runs the suite on every push and pull request (`.github/workflows/tests.yml`).
-
-## Project Structure
-
-```
-├── api/main.py              # FastAPI app: /query, /health, error mapping
-├── src/
-│   ├── config.py            # env-driven settings (+ .env loading)
-│   ├── schemas.py           # Pydantic models: Document, Chunk, AnswerResponse, ...
-│   ├── ingestion.py         # PDF/HTML → Document
-│   ├── chunking.py          # sliding-window chunker
-│   ├── chunk_store.py       # JSONL persistence of chunks
-│   ├── embeddings.py        # sentence-transformers wrapper (lazy singleton)
-│   ├── vectorstore.py       # FAISS index build/search/save/load
-│   ├── bm25_index.py        # BM25 index + tokenizer
-│   ├── hybrid.py            # RRF + HybridRetriever
-│   ├── llm.py               # answerability gate, Claude / Ollama structured generation
-│   ├── pipeline.py          # retrieval + generation → QueryResponse
-│   └── build_index.py       # CLI: full offline indexing
-├── streamlit_app.py         # UI (talks to the API over HTTP)
-├── eval/                    # eval_set.json + Recall@k script
-├── scripts/generate_docs.py # dev-only: data/sources/*.md → data/raw/*.pdf|html
-├── data/sources/            # synthetic markdown sources
-├── data/raw/                # ingestion input (generated PDF/HTML)
-├── tests/
-├── Dockerfile, docker-compose.yml
-└── requirements.txt, requirements-dev.txt
-```
-
-## Limitations
-
-- **Synthetic, small corpus.** 14 short documents, 31 chunks. The retrieval numbers above don't carry over to a realistic knowledge base.
-- **Fragile answerability gate.** A single global cosine threshold separates on-topic queries (~0.50–0.70) from finance-adjacent off-topic queries (~0.46–0.50) by a thin margin. In a manual test, *"Какая рекомендуемая процентная ставка по 30-летней ипотеке?"* scored 0.502, passed the gate, and `llama3.1:8b` answered "20–70%" by misreading a Basel III mortgage risk weight as an interest rate. The prompt-level `is_answerable` instruction did not catch it with the 8B model. A cross-encoder reranker or an LLM-based answerability check would be the next step.
-- **No generation evaluation.** Citations are requested and schema-validated, but nothing checks that quotes actually appear in the cited chunk or that the answer is faithful to them.
-- **No reranking, query rewriting, or multi-hop retrieval.** Retrieval is a single round of BM25 + dense search + RRF.
-- **Lexical search without morphology.** BM25 tokens are raw lowercase word forms. Russian inflection reduces lexical recall, and a lemmatizer or stemmer (e.g. `pymorphy3`, Snowball) would help.
-- **Exact, in-memory indexes.** `IndexFlatIP` and pickled BM25 suit this corpus size. There is no incremental indexing, no ANN index, and no persistence beyond local files.
-- **Local-model quality.** With `llama3.1:8b`, answers are terse, citations are sometimes generic, and each query took ~1 min on a laptop CPU in testing.
-- **Unauthenticated demo API.** CORS is fully open and there is no auth or rate limiting. Not meant for exposure beyond localhost.
+[MIT](LICENSE)

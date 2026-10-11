@@ -23,14 +23,11 @@ confidence в "insufficient_context", оставь citations пустым и у�
 
 
 class LLMOutputError(RuntimeError):
-    """The LLM responded, but not with a valid AnswerResponse."""
+    """LLM ответила, но не валидным AnswerResponse."""
 
 
 def _build_context_block(chunks: list[RetrievedChunk]) -> str:
-    parts = []
-    for rc in chunks:
-        parts.append(f"[chunk_id={rc.chunk.chunk_id}] ({rc.chunk.title})\n{rc.chunk.text}")
-    return "\n\n---\n\n".join(parts)
+    return "\n\n---\n\n".join(f"[chunk_id={rc.chunk.chunk_id}] ({rc.chunk.title})\n{rc.chunk.text}" for rc in chunks)
 
 
 def _build_user_message(question: str, retrieved: list[RetrievedChunk]) -> str:
@@ -61,13 +58,12 @@ def _generate_answer_anthropic(question: str, retrieved: list[RetrievedChunk]) -
         output_format=AnswerResponse,
     )
     if response.parsed_output is None:
-        # e.g. stop_reason == "refusal" or "max_tokens": no schema-valid JSON came back.
-        raise LLMOutputError(f"Model returned no structured output (stop_reason={response.stop_reason})")
+        # Например, stop_reason == "refusal" или "max_tokens": валидного JSON нет.
+        raise LLMOutputError(f"Модель не вернула структурированный ответ (stop_reason={response.stop_reason})")
     return response.parsed_output
 
 
 def _generate_answer_ollama(question: str, retrieved: list[RetrievedChunk]) -> AnswerResponse:
-    """Free, local generation via Ollama. No API key, no external calls."""
     resp = requests.post(
         f"{OLLAMA_BASE_URL}/api/chat",
         json={
@@ -87,16 +83,17 @@ def _generate_answer_ollama(question: str, retrieved: list[RetrievedChunk]) -> A
     try:
         return AnswerResponse.model_validate(json.loads(content))
     except (json.JSONDecodeError, ValidationError) as e:
-        raise LLMOutputError(f"Ollama returned output that does not match AnswerResponse: {e}") from e
+        raise LLMOutputError(f"Ответ Ollama не соответствует схеме AnswerResponse: {e}") from e
 
 
 def top_vector_score(retrieved: list[RetrievedChunk]) -> float:
-    # retrieved[0] is the top *fused* result, which may be a BM25-only hit with
-    # vector_score == 0.0, so gate on the best cosine similarity instead.
+    # Берём максимум, а не retrieved[0]: первый после RRF фрагмент может быть найден
+    # только BM25, и его vector_score равен 0.
     return max((rc.vector_score for rc in retrieved), default=0.0)
 
 
 def generate_answer(question: str, retrieved: list[RetrievedChunk]) -> AnswerResponse:
+    """Ответ по найденным фрагментам; при низкой релевантности LLM не вызывается."""
     if top_vector_score(retrieved) < MIN_RELEVANCE_SCORE:
         return _insufficient_context_response()
 

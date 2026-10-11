@@ -1,4 +1,6 @@
-from src.hybrid import reciprocal_rank_fusion
+import pytest
+
+from src.hybrid import HybridRetriever, reciprocal_rank_fusion
 
 
 def test_rrf_boosts_documents_ranked_high_in_both_lists():
@@ -37,3 +39,14 @@ def test_rrf_handles_disjoint_results():
 def test_rrf_empty_inputs():
     fused = reciprocal_rank_fusion([], [])
     assert fused == {}
+
+
+def test_retriever_rejects_inconsistent_indexes(monkeypatch):
+    retriever = HybridRetriever()
+    vectors, bm25 = retriever.vector_store, retriever.bm25_index
+    monkeypatch.setattr(vectors, "load", lambda: setattr(vectors, "chunk_ids", ["a", "b"]))
+    monkeypatch.setattr(bm25, "load", lambda: setattr(bm25, "chunk_ids", ["a"]))  # BM25 собран по другим фрагментам
+    monkeypatch.setattr("src.hybrid.load_chunks", lambda: {"a": object(), "b": object()})
+
+    with pytest.raises(RuntimeError, match="не согласованы"):
+        retriever.load()

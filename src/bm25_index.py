@@ -7,8 +7,7 @@ from rank_bm25 import BM25Okapi
 from src.config import BM25_INDEX_PATH
 from src.schemas import Chunk
 
-# Includes Cyrillic (а-яё) alongside Latin/digits so Russian-language chunks
-# and queries tokenize into real words instead of being dropped entirely.
+# Кириллица обязательна: без неё русские слова выпадали бы из индекса целиком.
 _TOKEN_RE = re.compile(r"[a-zA-Zа-яёА-ЯЁ0-9']+")
 
 
@@ -28,9 +27,9 @@ class BM25Index:
 
     def search(self, query: str, top_k: int) -> list[tuple[str, float]]:
         if self.bm25 is None:
-            raise RuntimeError("BM25 index not built/loaded")
+            raise RuntimeError("BM25-индекс не построен и не загружен")
         scores = self.bm25.get_scores(tokenize(query))
-        ranked = sorted(zip(self.chunk_ids, scores), key=lambda x: x[1], reverse=True)
+        ranked = sorted(zip(self.chunk_ids, scores, strict=True), key=lambda x: x[1], reverse=True)
         return [(cid, float(score)) for cid, score in ranked[:top_k] if score > 0]
 
     def save(self, path: Path = BM25_INDEX_PATH) -> None:

@@ -14,8 +14,7 @@ def _doc_id_for(path: Path) -> str:
 
 
 def _relative_source_path(path: Path) -> str:
-    # Store paths relative to the repo root so indexes are portable and don't
-    # embed machine-specific absolute paths.
+    # Путь относительно корня репозитория: индекс не должен зависеть от расположения проекта.
     try:
         return path.resolve().relative_to(BASE_DIR).as_posix()
     except ValueError:
@@ -53,29 +52,26 @@ def _title_from_pdf_text(text: str, fallback: str) -> str:
 
 
 def load_documents(raw_dir: Path) -> list[Document]:
+    """Читает все PDF и HTML из каталога (в алфавитном порядке); прочие файлы пропускаются."""
     documents: list[Document] = []
     for path in sorted(raw_dir.iterdir()):
-        if path.suffix.lower() == ".pdf":
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            source_format = "pdf"
             text = _load_pdf(path)
             title = _title_from_pdf_text(text, path.stem)
-            documents.append(
-                Document(
-                    doc_id=_doc_id_for(path),
-                    source_path=_relative_source_path(path),
-                    source_format="pdf",
-                    title=title,
-                    text=text,
-                )
-            )
-        elif path.suffix.lower() in (".html", ".htm"):
+        elif suffix in (".html", ".htm"):
+            source_format = "html"
             title, text = _load_html(path)
-            documents.append(
-                Document(
-                    doc_id=_doc_id_for(path),
-                    source_path=_relative_source_path(path),
-                    source_format="html",
-                    title=title,
-                    text=text,
-                )
+        else:
+            continue
+        documents.append(
+            Document(
+                doc_id=_doc_id_for(path),
+                source_path=_relative_source_path(path),
+                source_format=source_format,
+                title=title,
+                text=text,
             )
+        )
     return documents
